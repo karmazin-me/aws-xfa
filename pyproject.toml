@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: 0BSD
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aws-xfa"
+version = "1.0.0"
+description = "AWS MFA credential helper — exchange long-term credentials for temporary STS tokens"
+readme = "README.md"
+license = {text = "0BSD"}
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [
+    { name = "Eugene Karmazin", email = "awsxfa@icloud.com" },
+]
+keywords = ["aws", "mfa", "sts", "credentials", "1password", "cli"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Zero-Clause BSD (0BSD)",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = ["boto3"]
+
+[project.urls]
+Homepage = "https://github.com/karmazin-me/aws-xfa"
+Repository = "https://github.com/karmazin-me/aws-xfa"
+Issues = "https://github.com/karmazin-me/aws-xfa/issues"
+
+[project.scripts]
+aws-xfa = "awsxfa:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["awsxfa"]

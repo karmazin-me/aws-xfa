@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 405 130" width="405" height="130">
+  <!-- transparent background -->
+  <g font-family="'SF Mono','Cascadia Code','Fira Code','JetBrains Mono','Consolas','Menlo',monospace" font-size="16" font-weight="bold">
+    <text x="20" y="32" xml:space="preserve"><tspan fill="#ffaf00"> ▓▓▓  </tspan><tspan fill="#ff8700">▓   ▓ </tspan><tspan fill="#ff5f00"> ▓▓▓▓  </tspan><tspan fill="#a8a8a8">▓   ▓ </tspan><tspan fill="#808080">▓▓▓▓▓ </tspan><tspan fill="#585858"> ▓▓▓ </tspan></text>
+    <text x="20" y="54" xml:space="preserve"><tspan fill="#ffaf00">▓   ▓ </tspan><tspan fill="#ff8700">▓   ▓ </tspan><tspan fill="#ff5f00">▓      </tspan><tspan fill="#a8a8a8"> ▓ ▓  </tspan><tspan fill="#808080">▓     </tspan><tspan fill="#585858">▓   ▓</tspan></text>
+    <text x="20" y="76" xml:space="preserve"><tspan fill="#ffaf00">▓▓▓▓▓ </tspan><tspan fill="#ff8700">▓ ▓ ▓ </tspan><tspan fill="#ff5f00"> ▓▓▓   </tspan><tspan fill="#a8a8a8">  ▓   </tspan><tspan fill="#808080">▓▓▓▓  </tspan><tspan fill="#585858">▓▓▓▓▓</tspan></text>
+    <text x="20" y="98" xml:space="preserve"><tspan fill="#ffaf00">▓   ▓ </tspan><tspan fill="#ff8700">▓▓ ▓▓ </tspan><tspan fill="#ff5f00">    ▓  </tspan><tspan fill="#a8a8a8"> ▓ ▓  </tspan><tspan fill="#808080">▓     </tspan><tspan fill="#585858">▓   ▓</tspan></text>
+    <text x="20" y="120" xml:space="preserve"><tspan fill="#ffaf00">▓   ▓ </tspan><tspan fill="#ff8700">▓   ▓ </tspan><tspan fill="#ff5f00">▓▓▓▓   </tspan><tspan fill="#a8a8a8">▓   ▓ </tspan><tspan fill="#808080">▓     </tspan><tspan fill="#585858">▓   ▓</tspan></text>
+  </g>
+</svg>
