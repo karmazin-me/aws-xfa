@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="aws-xfa" />
+  <img src="https://raw.githubusercontent.com/karmazin-me/aws-xfa/main/assets/banner.png" alt="aws-xfa" />
 </p>
 
 # aws-xfa

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aws-xfa"
-version = "1.0.0"
+version = "1.0.1"
 description = "AWS MFA credential helper — exchange long-term credentials for temporary STS tokens"
 readme = "README.md"
 license = {text = "0BSD"}
