@@ -20,10 +20,14 @@ from botocore.exceptions import ClientError, ParamValidationError
 from awsxfa.util import (
     log_error_and_exit,
     prompter,
-    getpass_starred,
     detect_aws_cli_version,
     get_v2_install_suggestions,
     get_otp_from_1password,
+    prompt_with_validation,
+    validate_access_key_id,
+    validate_secret_access_key,
+    validate_mfa_arn,
+    validate_role_arn,
 )
 from awsxfa.xfa_config import (
     load_xfa_config,
@@ -480,13 +484,11 @@ def _state_b_migrate(
         mfa_device = None
 
     if not mfa_device:
-        console_input = prompter()
-        mfa_device = console_input(
+        mfa_device = prompt_with_validation(
             "Enter MFA device ARN for profile '%s' "
-            "(e.g. arn:aws:iam::123456789012:mfa/username): " % profile
-        ).strip()
-        if not mfa_device:
-            log_error_and_exit(logger, "MFA device ARN is required.")
+            "(e.g. arn:aws:iam::123456789012:mfa/username): " % profile,
+            validate_mfa_arn, logger,
+        )
 
     config.add_section(long_term_name)
     config.set(long_term_name, "aws_access_key_id", key_id)
@@ -529,21 +531,18 @@ def _state_c_create(args, config, profile, long_term_name, short_term_name, xfa_
     """Neither section exists: full from-scratch profile creation."""
     logger.info("Profile '%s' not found. Creating new MFA-enabled profile.", profile)
 
+    key_id = prompt_with_validation(
+        "AWS Access Key ID: ", validate_access_key_id, logger
+    )
+    access_key = prompt_with_validation(
+        "AWS Secret Access Key: ", validate_secret_access_key, logger, secret=True
+    )
+    mfa_device = prompt_with_validation(
+        "MFA device ARN (e.g. arn:aws:iam::123456789012:mfa/username): ",
+        validate_mfa_arn, logger,
+    )
+
     console_input = prompter()
-    key_id = console_input("AWS Access Key ID: ").strip()
-    if not key_id:
-        log_error_and_exit(logger, "AWS Access Key ID is required.")
-
-    access_key = getpass_starred("AWS Secret Access Key: ").strip()
-    if not access_key:
-        log_error_and_exit(logger, "AWS Secret Access Key is required.")
-
-    mfa_device = console_input(
-        "MFA device ARN (e.g. arn:aws:iam::123456789012:mfa/username): "
-    ).strip()
-    if not mfa_device:
-        log_error_and_exit(logger, "MFA device ARN is required.")
-
     region = console_input("AWS region (e.g. us-east-1): ").strip()
     if not region:
         log_error_and_exit(logger, "AWS region is required.")
@@ -635,11 +634,10 @@ def _collect_sub_profiles(profile, region):
         if not sub_name:
             log_error_and_exit(logger, "Sub-profile name is required.")
 
-        role_arn = console_input(
-            "Role ARN to assume (e.g. arn:aws:iam::123456789012:role/role-name): "
-        ).strip()
-        if not role_arn:
-            log_error_and_exit(logger, "Role ARN is required.")
+        role_arn = prompt_with_validation(
+            "Role ARN to assume (e.g. arn:aws:iam::123456789012:role/role-name): ",
+            validate_role_arn, logger,
+        )
 
         if region:
             sub_region = console_input("Region [%s]: " % region).strip() or region

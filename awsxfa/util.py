@@ -96,6 +96,80 @@ def get_otp_from_1password(item_name, logger):
         return None
 
 
+def validate_access_key_id(value):
+    """Check AWS access key ID format: AKIA prefix, >=15 chars."""
+    if not value:
+        return False, "AWS Access Key ID is required."
+    if not value.startswith("AKIA"):
+        if value.startswith("ASIA"):
+            return False, (
+                "Key starts with ASIA (temporary STS credential). "
+                "Enter a long-term key starting with AKIA."
+            )
+        return False, "AWS Access Key ID must start with 'AKIA'."
+    if len(value) < 15:
+        return False, "AWS Access Key ID is too short (minimum 15 characters)."
+    if not re.match(r'^[A-Za-z0-9]+$', value):
+        return False, (
+            "AWS Access Key ID must contain only "
+            "alphanumeric characters."
+        )
+    return True, ""
+
+
+def validate_secret_access_key(value):
+    """Check AWS secret access key format: >=35 chars, base64 alphabet."""
+    if not value:
+        return False, "AWS Secret Access Key is required."
+    if len(value) < 35:
+        return False, (
+            "AWS Secret Access Key is too short "
+            "(minimum 35 characters)."
+        )
+    if not re.match(r'^[A-Za-z0-9+/=]+$', value):
+        return False, (
+            "AWS Secret Access Key contains invalid characters."
+        )
+    return True, ""
+
+
+def validate_mfa_arn(value):
+    """Check MFA device ARN format."""
+    if not value:
+        return False, "MFA device ARN is required."
+    if not re.match(r'^arn:aws[a-z-]*:iam::\d{12}:mfa/.+$', value):
+        return False, (
+            "Invalid MFA ARN format. "
+            "Expected: arn:aws:iam::<12-digit-account>:mfa/<username>"
+        )
+    return True, ""
+
+
+def validate_role_arn(value):
+    """Check IAM role ARN format."""
+    if not value:
+        return False, "Role ARN is required."
+    if not re.match(r'^arn:aws[a-z-]*:iam::\d{12}:role/.+$', value):
+        return False, (
+            "Invalid Role ARN format. "
+            "Expected: arn:aws:iam::<12-digit-account>:role/<role-name>"
+        )
+    return True, ""
+
+
+def prompt_with_validation(prompt_text, validator, log, secret=False):
+    """Prompt in a loop until validator passes. Warns on bad input."""
+    while True:
+        if secret:
+            value = getpass_starred(prompt_text).strip()
+        else:
+            value = input(prompt_text).strip()
+        ok, msg = validator(value)
+        if ok:
+            return value
+        log.warning(msg)
+
+
 def prompter():
     return input
 

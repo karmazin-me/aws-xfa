@@ -17,10 +17,11 @@ pip install aws-xfa
 If you don't have `~/.aws/credentials` yet, just run:
 
 ```sh
-aws-xfa
+aws-xfa          # sets up the "default" profile
+aws-xfa main     # sets up a profile named "main"
 ```
 
-It will prompt you for everything:
+The profile name you pass (or `default` when omitted) determines all section names in your credentials file. aws-xfa will prompt you for everything:
 
 ```
 AWS Access Key ID: AKIA...
@@ -37,7 +38,14 @@ Then it calls AWS STS and writes your temporary credentials to `~/.aws/credentia
 
 If you already have `~/.aws/credentials` with a `[default]` section, aws-xfa will migrate it automatically — creating `[default-long-term]` for your permanent keys, and using `[default]` for the temporary STS credentials.
 
-Your credentials file structure after setup:
+**How profile names map to sections:**
+
+| Command | Profile | Long-term section | Short-term section |
+|---------|---------|-------------------|--------------------|
+| `aws-xfa` | `default` | `[default-long-term]` | `[default]` |
+| `aws-xfa main` | `main` | `[main-long-term]` | `[main]` |
+
+Your credentials file structure after setup (using the `default` profile):
 
 ```ini
 [default-long-term]
@@ -68,26 +76,35 @@ aws-xfa
 # Your credentials are still valid for 11h 55m 34s, they will expire at ...
 ```
 
-For a named profile (`[work-long-term]` → `[work]`):
+For a named profile (`[main-long-term]` → `[main]`):
 
 ```sh
-aws-xfa work
+aws-xfa main
 ```
 
 Force refresh before expiry:
 
 ```sh
 aws-xfa --force
-aws-xfa work --force
+aws-xfa main --force
 ```
 
 ## Sub-profiles
 
-If you use AWS role assumption (e.g. separate prod/stage accounts), aws-xfa can create sub-profiles that reference your main profile as `source_profile`. During profile setup you'll be asked:
+If you use AWS role assumption (e.g. separate prod/stage accounts), aws-xfa can create sub-profiles that reference your parent profile as `source_profile`.
+
+Sub-profiles are named **`{profile}-{name}`** — for example, profile `main` with sub-profile `prod` becomes `main-prod`. Profile `default` with sub-profile `staging` becomes `default-staging`.
+
+During first-run setup, aws-xfa asks if you want to add sub-profiles. You can also add them at any time:
+
+```sh
+aws-xfa add-subprofile main       # add sub-profiles under the "main" profile
+aws-xfa add-subprofile default    # add sub-profiles under the "default" profile
+```
+
+The interactive prompt:
 
 ```
-aws-xfa add-subprofile main
-Would you like to add sub-profiles? [y/N]: y
 Sub-profile name (e.g. prod, stage): prod
 Role ARN to assume (e.g. arn:aws:iam::123456789012:role/role-name): arn:aws:iam::263649228919:role/role-name
 Region [us-west-1]:
@@ -105,12 +122,6 @@ role_arn = arn:aws:iam::263649228919:role/role-name
 output = json
 ```
 
-To add sub-profiles to an existing profile at any time:
-
-```sh
-aws-xfa add-subprofile skoop
-```
-
 ## 1Password integration
 
 Skip manual OTP entry entirely. If you answered `y` during setup, you're already configured. To enable it later:
@@ -123,8 +134,8 @@ aws-xfa --1pass
 The item name is saved to `~/.config/aws-xfa/config.json`. **From then on, aws-xfa fetches the OTP automatically on every run** — no `--1pass` flag needed.
 
 ```sh
-aws-xfa           # OTP fetched from 1Password silently
-aws-xfa work      # same for named profile
+aws-xfa           # OTP fetched from 1Password silently (default profile)
+aws-xfa main      # same for named profile
 ```
 
 Requires the [`op` CLI](https://developer.1password.com/docs/cli/) to be installed and signed in. If `op` fails, aws-xfa falls back to prompting you manually.
