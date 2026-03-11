@@ -27,6 +27,7 @@ AWS Access Key ID: AKIA...
 AWS Secret Access Key: ************
 MFA device ARN (e.g. arn:aws:iam::123456789012:mfa/username): arn:aws:iam::...
 AWS region (e.g. us-east-1): us-east-1
+Would you like to add sub-profiles? [y/N]:
 Use 1Password CLI to automatically fetch MFA codes? [y/N]:
 ```
 
@@ -78,6 +79,36 @@ Force refresh before expiry:
 ```sh
 aws-xfa --force
 aws-xfa work --force
+```
+
+## Sub-profiles
+
+If you use AWS role assumption (e.g. separate prod/stage accounts), aws-xfa can create sub-profiles that reference your main profile as `source_profile`. During profile setup you'll be asked:
+
+```
+aws-xfa add-subprofile main
+Would you like to add sub-profiles? [y/N]: y
+Sub-profile name (e.g. prod, stage): prod
+Role ARN to assume (e.g. arn:aws:iam::123456789012:role/role-name): arn:aws:iam::263649228919:role/role-name
+Region [us-west-1]:
+Added sub-profile 'main-prod'
+Add another sub-profile? [y/N]: n
+```
+
+This writes to `~/.aws/config` only (no credentials changes):
+
+```ini
+[profile main-prod]
+source_profile = main
+region = us-west-1
+role_arn = arn:aws:iam::263649228919:role/role-name
+output = json
+```
+
+To add sub-profiles to an existing profile at any time:
+
+```sh
+aws-xfa add-subprofile skoop
 ```
 
 ## 1Password integration

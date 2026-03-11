@@ -636,7 +636,7 @@ def _collect_sub_profiles(profile, region):
             log_error_and_exit(logger, "Sub-profile name is required.")
 
         role_arn = console_input(
-            "Role ARN to assume (e.g. arn:aws:iam::123456789012:role/devops): "
+            "Role ARN to assume (e.g. arn:aws:iam::123456789012:role/role-name): "
         ).strip()
         if not role_arn:
             log_error_and_exit(logger, "Role ARN is required.")
