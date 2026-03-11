@@ -20,12 +20,14 @@ def detect_aws_cli_version():
     """
     try:
         result = subprocess.run(
-            ['aws', '--version'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=5, text=True
+            ["aws", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            text=True,
         )
-        output = (result.stdout or '') + (result.stderr or '')
-        match = re.search(r'aws-cli/(\d+)\.', output)
+        output = (result.stdout or "") + (result.stderr or "")
+        match = re.search(r"aws-cli/(\d+)\.", output)
         if match:
             return int(match.group(1)), output.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -36,13 +38,12 @@ def detect_aws_cli_version():
 def get_v2_install_suggestions():
     """Returns platform-appropriate AWS CLI v2 installation options."""
     system = platform.system().lower()
-    if system == 'darwin':
+    if system == "darwin":
         return [
             "  Option 1 (Homebrew):  brew install awscli",
-            "  Option 2 (pkg):       "
-            "https://awscli.amazonaws.com/AWSCLIV2.pkg",
+            "  Option 2 (pkg):       https://awscli.amazonaws.com/AWSCLIV2.pkg",
         ]
-    elif system == 'linux':
+    elif system == "linux":
         return [
             "  Option 1 (pkg mgr):   use your Linux package manager "
             "(apt, dnf, yum, pacman, zypper, etc.) to install 'awscli'",
@@ -50,7 +51,7 @@ def get_v2_install_suggestions():
             "https://docs.aws.amazon.com/cli/latest/userguide/"
             "getting-started-install.html",
         ]
-    elif system == 'windows':
+    elif system == "windows":
         return [
             "  Option 1 (winget):    winget install Amazon.AWSCLI",
             "  Option 2 (choco):     choco install awscli",
@@ -69,28 +70,29 @@ def get_otp_from_1password(item_name, logger):
     """
     try:
         result = subprocess.run(
-            ['op', 'item', 'get', item_name, '--otp'],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=30, text=True
+            ["op", "item", "get", item_name, "--otp"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            text=True,
         )
         if result.returncode != 0:
             logger.warning(
                 "1Password CLI failed for item '%s': %s",
-                item_name, result.stderr.strip())
+                item_name,
+                result.stderr.strip(),
+            )
             return None
         otp = result.stdout.strip()
         if not otp:
-            logger.warning(
-                "1Password returned empty OTP for item '%s'", item_name)
+            logger.warning("1Password returned empty OTP for item '%s'", item_name)
             return None
         return otp
     except FileNotFoundError:
-        logger.warning(
-            "'op' CLI not found in PATH; cannot fetch MFA from 1Password")
+        logger.warning("'op' CLI not found in PATH; cannot fetch MFA from 1Password")
         return None
     except subprocess.TimeoutExpired:
-        logger.warning(
-            "'op' CLI timed out fetching OTP for item '%s'", item_name)
+        logger.warning("'op' CLI timed out fetching OTP for item '%s'", item_name)
         return None
 
 
@@ -98,7 +100,7 @@ def prompter():
     return input
 
 
-def getpass_starred(prompt=''):
+def getpass_starred(prompt=""):
     """Prompt for a secret, echoing * for each character typed.
 
     Falls back to no-echo (getpass behaviour) if the terminal cannot be
@@ -110,47 +112,50 @@ def getpass_starred(prompt=''):
     try:
         import tty
         import termios
+
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         try:
             tty.setraw(fd)
             while True:
                 ch = sys.stdin.read(1)
-                if ch in ('\r', '\n'):
+                if ch in ("\r", "\n"):
                     break
-                elif ch in ('\x7f', '\x08'):   # backspace / DEL
+                elif ch in ("\x7f", "\x08"):  # backspace / DEL
                     if chars:
                         chars.pop()
-                        sys.stdout.write('\b \b')
+                        sys.stdout.write("\b \b")
                         sys.stdout.flush()
-                elif ch == '\x03':             # Ctrl-C
+                elif ch == "\x03":  # Ctrl-C
                     raise KeyboardInterrupt
                 else:
                     chars.append(ch)
-                    sys.stdout.write('*')
+                    sys.stdout.write("*")
                     sys.stdout.flush()
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
     except ImportError:
         import msvcrt
+
         while True:
             ch = msvcrt.getwch()
-            if ch in ('\r', '\n'):
+            if ch in ("\r", "\n"):
                 break
-            elif ch in ('\x08', '\x7f'):       # backspace
+            elif ch in ("\x08", "\x7f"):  # backspace
                 if chars:
                     chars.pop()
-                    sys.stdout.write('\b \b')
+                    sys.stdout.write("\b \b")
                     sys.stdout.flush()
-            elif ch == '\x03':
+            elif ch == "\x03":
                 raise KeyboardInterrupt
             else:
                 chars.append(ch)
-                sys.stdout.write('*')
+                sys.stdout.write("*")
                 sys.stdout.flush()
     except termios.error:
         import getpass
-        sys.stdout.write('\n')
-        return getpass.getpass('').strip()
-    sys.stdout.write('\n')
-    return ''.join(chars)
+
+        sys.stdout.write("\n")
+        return getpass.getpass("").strip()
+    sys.stdout.write("\n")
+    return "".join(chars)
