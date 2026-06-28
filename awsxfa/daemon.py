@@ -229,6 +229,31 @@ def refresh_profile(profile, log):
 # ── Main loop ────────────────────────────────────────────────────────────────
 
 
+def _daemon_refusal_reason(xfa_config, profile):
+    """Return a refusal message if *profile* may not be daemon-refreshed, else
+    None. Unattended refresh cannot solicit a YubiKey touch or an SSO browser
+    login, so only profiles using 1Password (explicitly or by inference) are
+    allowed."""
+    from awsxfa import _detect_auth_method
+    from awsxfa.xfa_config import get_mfa_source
+
+    if _detect_auth_method(profile, xfa_config) == "sso":
+        return (
+            "Profile '%s' uses AWS IAM Identity Center (SSO); refusing daemon "
+            "refresh — SSO login needs an interactive browser/FIDO authorization "
+            "that cannot run unattended." % profile
+        )
+
+    source = get_mfa_source(xfa_config, profile)
+    if source is not None and source != "1password":
+        return (
+            "Profile '%s' has mfa_source=%s; refusing daemon refresh — "
+            "unattended refresh requires 1Password (a YubiKey touch or manual "
+            "entry cannot be automated)." % (profile, source)
+        )
+    return None
+
+
 def run_refresh_loop(creds_path, profile):
     """Run indefinitely, refreshing credentials for *profile* before expiry."""
     log = setup_error_log(profile)
@@ -248,6 +273,11 @@ def run_refresh_loop(creds_path, profile):
         from awsxfa.xfa_config import load_xfa_config, get_1pass_item
 
         xfa_config = load_xfa_config()
+        reason = _daemon_refusal_reason(xfa_config, profile)
+        if reason:
+            log.error(reason)
+            time.sleep(FAILURE_BACKOFF_SECS)
+            continue
         if not get_1pass_item(xfa_config, profile):
             log.error("No 1Password item configured for profile '%s'", profile)
             time.sleep(FAILURE_BACKOFF_SECS)

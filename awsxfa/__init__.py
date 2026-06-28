@@ -4,9 +4,11 @@ import configparser
 from configparser import NoOptionError, NoSectionError
 import datetime
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
+import json
 import logging
 import os
 import platform
+import subprocess
 import sys
 
 try:
@@ -23,17 +25,27 @@ from awsxfa.util import (
     detect_aws_cli_version,
     get_v2_install_suggestions,
     get_otp_from_1password,
+    get_otp_from_ykman,
+    list_ykman_accounts,
     prompt_with_validation,
     validate_access_key_id,
     validate_secret_access_key,
     validate_mfa_arn,
     validate_role_arn,
+    validate_totp_code,
+    is_valid_totp,
+    looks_like_modhex,
 )
 from awsxfa.xfa_config import (
     load_xfa_config,
     save_xfa_config,
     get_1pass_item,
     set_1pass_item,
+    get_mfa_source,
+    set_mfa_source,
+    get_ykman_account,
+    set_ykman_account,
+    get_auth_type,
 )
 
 logger = logging.getLogger("aws-xfa")
@@ -73,10 +85,19 @@ def _daemon_cmd(argv):
     if not args.action:
         parser.print_help()
         sys.exit(1)
-    from awsxfa.daemon import daemon_install, daemon_stop, daemon_status, daemon_delete
+    from awsxfa.daemon import (
+        daemon_install,
+        daemon_stop,
+        daemon_status,
+        daemon_delete,
+        _daemon_refusal_reason,
+    )
 
     if args.action == "install":
         xfa_config = load_xfa_config()
+        reason = _daemon_refusal_reason(xfa_config, args.profile)
+        if reason:
+            log_error_and_exit(logger, reason)
         xfa_config = _bootstrap_1pass(xfa_config, args.profile)
         save_xfa_config(xfa_config)
         daemon_install(args.profile, AWS_CREDS_PATH)
@@ -121,29 +142,12 @@ def _add_subprofile_cmd(argv):
     print("\nAll set\n")
 
 
-def main():
-    if "--daemon-loop" in sys.argv:
-        try:
-            idx = sys.argv.index("--profile")
-            profile = sys.argv[idx + 1]
-        except (ValueError, IndexError):
-            sys.stderr.write("--daemon-loop requires --profile PROFILE\n")
-            sys.exit(1)
-        from awsxfa.daemon import run_refresh_loop
+def build_parser():
+    """Construct the top-level argument parser for the credential-refresh flow.
 
-        run_refresh_loop(AWS_CREDS_PATH, profile)
-        return
-
-    _print_header()
-
-    if len(sys.argv) > 1 and sys.argv[1] == "daemon":
-        _daemon_cmd(sys.argv[2:])
-        return
-
-    if len(sys.argv) > 1 and sys.argv[1] == "add-subprofile":
-        _add_subprofile_cmd(sys.argv[2:])
-        return
-
+    Extracted so the parser (and the --1pass/--ykman mutual exclusion) can be
+    unit-tested without invoking main().
+    """
     parser = argparse.ArgumentParser(
         description="Exchange long-term AWS credentials (with MFA) for "
         "temporary STS credentials.",
@@ -185,14 +189,48 @@ def main():
         choices=["regular", "debug"],
         default="regular",
     )
-    parser.add_argument(
+    mfa_group = parser.add_mutually_exclusive_group()
+    mfa_group.add_argument(
         "--1pass",
         dest="onepassword",
         action="store_true",
-        help="Use 1Password CLI to fetch MFA code. On first use, prompts for "
-        "the 1Password item name and saves it for the profile.",
+        help="Use 1Password CLI to fetch the MFA code. On first use, prompts "
+        "for the 1Password item name and saves it for the profile.",
     )
-    args = parser.parse_args()
+    mfa_group.add_argument(
+        "--ykman",
+        dest="ykman",
+        action="store_true",
+        help="Fetch the MFA code from a YubiKey via ykman OATH-TOTP "
+        "(requires a configured ykman_account for the profile).",
+    )
+    return parser
+
+
+def main():
+    if "--daemon-loop" in sys.argv:
+        try:
+            idx = sys.argv.index("--profile")
+            profile = sys.argv[idx + 1]
+        except (ValueError, IndexError):
+            sys.stderr.write("--daemon-loop requires --profile PROFILE\n")
+            sys.exit(1)
+        from awsxfa.daemon import run_refresh_loop
+
+        run_refresh_loop(AWS_CREDS_PATH, profile)
+        return
+
+    _print_header()
+
+    if len(sys.argv) > 1 and sys.argv[1] == "daemon":
+        _daemon_cmd(sys.argv[2:])
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "add-subprofile":
+        _add_subprofile_cmd(sys.argv[2:])
+        return
+
+    args = build_parser().parse_args()
 
     level = logging.DEBUG if args.log_level == "debug" else logging.INFO
     setup_logger(level)
@@ -235,11 +273,13 @@ def get_config(aws_creds_path):
     return config
 
 
-def _get_region_from_aws_config(profile):
-    """Read region from ~/.aws/config for the given profile.
+def _get_aws_config_value(profile, key):
+    """Read a single *key* from ~/.aws/config for the given profile.
 
-    AWS CLI v2 convention stores region in ~/.aws/config, not credentials.
-    Respects the AWS_CONFIG_FILE env var override.
+    AWS CLI v2 convention stores profile settings in ~/.aws/config, not
+    credentials. Respects the AWS_CONFIG_FILE env var override. The section is
+    'default' for the default profile and 'profile <name>' otherwise. Returns
+    None if the file, section, or key is absent.
     """
     _env_config = os.environ.get("AWS_CONFIG_FILE")
     config_path = (
@@ -256,9 +296,14 @@ def _get_region_from_aws_config(profile):
         return None
     section = "default" if profile == "default" else "profile %s" % profile
     try:
-        return cfg.get(section, "region")
+        return cfg.get(section, key)
     except (configparser.NoSectionError, configparser.NoOptionError):
         return None
+
+
+def _get_region_from_aws_config(profile):
+    """Read region from ~/.aws/config for the given profile."""
+    return _get_aws_config_value(profile, "region")
 
 
 def _ensure_aws_config(profile, region):
@@ -315,6 +360,96 @@ def _resolve_region(profile):
     )
 
 
+def _detect_auth_method(profile, xfa_config):
+    """Return 'sso' or 'sts' for *profile*.
+
+    Precedence:
+      1. explicit per-profile 'auth_type' override in the aws-xfa config
+         (unknown value -> hard error);
+      2. IAM Identity Center role-target markers in ~/.aws/config — both
+         'sso_account_id' and 'sso_role_name' present (these are what
+         'aws configure export-credentials' needs; the source 'sso_session' /
+         'sso_start_url' accompanies them). A 'sso_session'-only profile with no
+         role target is NOT directly assumable, so it is treated as 'sts';
+      3. 'sts' otherwise.
+    """
+    override = get_auth_type(xfa_config, profile)
+    if override is not None:
+        if override not in ("sso", "sts"):
+            log_error_and_exit(
+                logger,
+                "Unknown auth_type '%s' for profile '%s'. Expected 'sso' or "
+                "'sts'." % (override, profile),
+            )
+        return override
+    if _get_aws_config_value(profile, "sso_account_id") and _get_aws_config_value(
+        profile, "sso_role_name"
+    ):
+        return "sso"
+    return "sts"
+
+
+def _write_short_term_creds(config, short_term_name, creds, expiration_dt):
+    """Write the four short-term credential options + UTC 'expiration' to the
+    [short_term_name] section and persist to AWS_CREDS_PATH.
+
+    *creds* is a mapping with AccessKeyId/SecretAccessKey/SessionToken keys
+    (aws_security_token mirrors aws_session_token for boto2 compatibility).
+    *expiration_dt* is a datetime, stored as '%Y-%m-%d %H:%M:%S'.
+    Shared by the STS and SSO paths.
+    """
+    if not config.has_section(short_term_name):
+        config.add_section(short_term_name)
+    options = [
+        ("aws_access_key_id", "AccessKeyId"),
+        ("aws_secret_access_key", "SecretAccessKey"),
+        ("aws_session_token", "SessionToken"),
+        ("aws_security_token", "SessionToken"),
+    ]
+    for option, value in options:
+        config.set(short_term_name, option, creds[value])
+    config.set(
+        short_term_name,
+        "expiration",
+        expiration_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    with open(AWS_CREDS_PATH, "w") as configfile:
+        config.write(configfile)
+
+
+def _short_term_still_valid(config, short_term_name, force, min_remaining=0):
+    """Return True if [short_term_name] holds all four credential keys plus an
+    'expiration' more than *min_remaining* seconds in the future and *force* is
+    not set. Logs the 'still valid' line when True. Mirrors the State-A
+    skip-check; min_remaining=0 keeps STS parity, the SSO path passes a margin.
+    """
+    if force or not config.has_section(short_term_name):
+        return False
+    try:
+        for option in (
+            "aws_access_key_id",
+            "aws_secret_access_key",
+            "aws_session_token",
+            "expiration",
+        ):
+            config.get(short_term_name, option)
+        exp = datetime.datetime.strptime(
+            config.get(short_term_name, "expiration"), "%Y-%m-%d %H:%M:%S"
+        )
+    except (NoOptionError, NoSectionError, ValueError):
+        return False
+    diff = exp - datetime.datetime.utcnow()
+    if diff.total_seconds() <= min_remaining:
+        return False
+    logger.info(
+        "Your credentials are still valid for %s, they will expire at %s",
+        _bold(_format_duration(diff.total_seconds())),
+        _bold(_format_expiration(exp)),
+    )
+    print()
+    return True
+
+
 def validate(args, config, xfa_config):
     profile = args.profile
     long_term_name = "%s-long-term" % profile
@@ -338,6 +473,21 @@ def validate(args, config, xfa_config):
         for suggestion in get_v2_install_suggestions():
             logger.warning(suggestion)
         print()
+
+    if _detect_auth_method(profile, xfa_config) == "sso":
+        if (
+            getattr(args, "onepassword", False)
+            or getattr(args, "ykman", False)
+            or args.duration
+        ):
+            logger.info(
+                "Profile '%s' uses AWS IAM Identity Center (SSO); "
+                "--1pass/--ykman/--duration are ignored (SSO has no OTP leg and "
+                "the session length is set by the permission set).",
+                profile,
+            )
+        get_credentials_sso(profile, config, args, xfa_config)
+        return
 
     has_long_term = config.has_section(long_term_name)
     has_short_term = config.has_section(short_term_name)
@@ -511,7 +661,7 @@ def _state_b_migrate(
     _ensure_aws_config(profile, region)
     _prompt_sub_profiles(profile, region)
 
-    xfa_config = _prompt_1pass_setup(xfa_config, profile)
+    xfa_config = _prompt_mfa_source_setup(xfa_config, profile, mfa_device)
     duration = _resolve_duration(args)
     get_credentials(
         short_term_name,
@@ -561,7 +711,7 @@ def _state_c_create(args, config, profile, long_term_name, short_term_name, xfa_
     _ensure_aws_config(profile, region)
     _prompt_sub_profiles(profile, region)
 
-    xfa_config = _prompt_1pass_setup(xfa_config, profile)
+    xfa_config = _prompt_mfa_source_setup(xfa_config, profile, mfa_device)
     duration = _resolve_duration(args)
     get_credentials(
         short_term_name,
@@ -577,20 +727,84 @@ def _state_c_create(args, config, profile, long_term_name, short_term_name, xfa_
     )
 
 
-def _prompt_1pass_setup(xfa_config, profile):
-    """During profile setup, offer to configure 1Password integration."""
+def _setup_ykman_source(xfa_config, profile, mfa_device):
+    """Configure the YubiKey (ykman) OATH-TOTP source for a profile."""
     console_input = prompter()
-    use_1pass = (
-        console_input("Use 1Password CLI to automatically fetch MFA codes? [y/N]: ")
-        .strip()
-        .lower()
+    accounts = list_ykman_accounts(logger)
+    if accounts:
+        for i, label in enumerate(accounts, 1):
+            print("  [%d] %s" % (i, label))
+        sel = console_input("Select the OATH account for AWS [1]: ").strip() or "1"
+        try:
+            account = accounts[int(sel) - 1]
+        except (ValueError, IndexError):
+            log_error_and_exit(logger, "Invalid selection.")
+    else:
+        logger.warning(
+            "Could not list ykman accounts (key absent, ykman missing, or OATH "
+            "locked). Enter the exact OATH account label manually."
+        )
+        account = console_input("OATH account label: ").strip()
+    if not account:
+        log_error_and_exit(
+            logger, "An OATH account label is required for mfa_source=ykman."
+        )
+    xfa_config = set_ykman_account(xfa_config, profile, account)
+    xfa_config = set_mfa_source(xfa_config, profile, "ykman")
+    save_xfa_config(xfa_config)
+    logger.info("YubiKey (ykman) configured for profile '%s'.", profile)
+
+    if accounts:
+        verify = (
+            console_input("Verify by generating a code now? [y/N]: ").strip().lower()
+        )
+        if verify == "y":
+            code = get_otp_from_ykman(account, logger)
+            if code:
+                show = (
+                    console_input("Display the generated code? [y/N]: ")
+                    .strip()
+                    .lower()
+                )
+                if show == "y":
+                    print("  Generated code: %s" % code)
+                else:
+                    print("  Generated a valid 6-digit code.")
+            print("  mfa_serial ARN: %s" % mfa_device)
+            print("  OATH label:     %s" % account)
+            print(
+                "  A working code proves ykman works, NOT that this label maps "
+                "to that ARN — both must refer to the same AWS MFA registration."
+            )
+    return xfa_config
+
+
+def _prompt_mfa_source_setup(xfa_config, profile, mfa_device):
+    """During profile setup, choose how MFA codes are obtained."""
+    console_input = prompter()
+    choice = (
+        console_input(
+            "MFA code source for profile '%s'?\n"
+            "  [1] YubiKey (ykman OATH-TOTP)\n"
+            "  [2] 1Password CLI\n"
+            "  [3] Manual entry each time\n"
+            "Choose [3]: " % profile
+        ).strip()
+        or "3"
     )
-    if use_1pass == "y":
+    if choice == "1":
+        return _setup_ykman_source(xfa_config, profile, mfa_device)
+    if choice == "2":
         item_name = console_input("1Password item name (e.g. 'aws work'): ").strip()
         if item_name:
             xfa_config = set_1pass_item(xfa_config, profile, item_name)
+            xfa_config = set_mfa_source(xfa_config, profile, "1password")
             save_xfa_config(xfa_config)
-            logger.info("1Password item saved for profile '%s'.", profile)
+            logger.info("1Password configured for profile '%s'.", profile)
+        return xfa_config
+    # [3] manual: record the explicit choice so inference can't override it.
+    xfa_config = set_mfa_source(xfa_config, profile, "prompt")
+    save_xfa_config(xfa_config)
     return xfa_config
 
 
@@ -677,6 +891,31 @@ def _bootstrap_1pass(xfa_config, profile):
     return xfa_config
 
 
+def _resolve_mfa_source(args, xfa_config, profile):
+    """Decide which OTP source to use for *profile*.
+
+    Precedence: CLI flag (--ykman / --1pass) > per-profile ``mfa_source`` >
+    inference (1Password item set -> '1password', else 'prompt'). Returns
+    ``(source, xfa_config)``; the config may be re-bootstrapped in the
+    1Password branch. Exits on an unknown configured ``mfa_source``.
+    """
+    if getattr(args, "ykman", False):
+        return "ykman", xfa_config
+    if getattr(args, "onepassword", False):
+        xfa_config = _bootstrap_1pass(xfa_config, profile)
+        return "1password", xfa_config
+    configured = get_mfa_source(xfa_config, profile)
+    if configured is not None:
+        if configured not in ("ykman", "1password", "prompt"):
+            log_error_and_exit(
+                logger,
+                "Unknown mfa_source '%s' for profile '%s'. Expected one of "
+                "ykman, 1password, prompt." % (configured, profile),
+            )
+        return configured, xfa_config
+    return ("1password" if get_1pass_item(xfa_config, profile) else "prompt"), xfa_config
+
+
 def get_credentials(
     short_term_name,
     lt_key_id,
@@ -689,38 +928,102 @@ def get_credentials(
     profile,
     region=None,
 ):
-    console_input = prompter()
+    prompt_text = (
+        "Enter AWS MFA code for device [%s] "
+        "(renewing for %s seconds): " % (mfa_device, duration)
+    )
 
-    if args.onepassword:
-        xfa_config = _bootstrap_1pass(xfa_config, profile)
+    # (a) Reject a FIDO/U2F serial up front — STS cannot use FIDO keys.
+    if mfa_device and ":u2f/" in mfa_device:
+        log_error_and_exit(
+            logger,
+            "MFA device [%s] is a FIDO/U2F security key. FIDO works only for "
+            "AWS Console sign-in; the CLI/STS needs a virtual MFA (OATH-TOTP) "
+            "device. Register one in IAM and point this profile's "
+            "aws_mfa_device at the new ':mfa/' ARN." % mfa_device,
+        )
 
-    item = get_1pass_item(xfa_config, profile)
-    if item:
-        mfa_token = get_otp_from_1password(item, logger)
-        if mfa_token is None:
-            if not sys.stdin.isatty():
-                log_error_and_exit(
-                    logger,
-                    "1Password OTP lookup failed and no interactive "
-                    "terminal is available for manual entry.",
-                )
-            logger.warning("Falling back to manual MFA entry.")
-            mfa_token = console_input(
-                "Enter AWS MFA code for device [%s] "
-                "(renewing for %s seconds): " % (mfa_device, duration)
+    # (b) Resolve the OTP source.
+    source, xfa_config = _resolve_mfa_source(args, xfa_config, profile)
+
+    # (b') Note when an explicit/config source ignores a configured 1pass item.
+    if source != "1password" and get_1pass_item(xfa_config, profile):
+        logger.info(
+            "Profile '%s' has a 1Password item but mfa_source=%s; "
+            "1Password is being ignored.",
+            profile,
+            source,
+        )
+
+    # (c) Per-source config validation (hard errors, no silent fallback).
+    account = item = None
+    if source == "ykman":
+        account = get_ykman_account(xfa_config, profile)
+        if not account:
+            log_error_and_exit(
+                logger,
+                "mfa_source=ykman but no ykman_account is set for profile "
+                "'%s'. Re-run setup or pick a label from "
+                "'ykman oath accounts list'." % profile,
             )
-    else:
+    elif source == "1password":
+        item = get_1pass_item(xfa_config, profile)
+        if not item:
+            log_error_and_exit(
+                logger,
+                "1Password selected but no item is configured for profile "
+                "'%s'. Run 'aws-xfa %s --1pass'." % (profile, profile),
+            )
+
+    # (d) ykman and prompt both need an interactive terminal.
+    if source in ("ykman", "prompt") and not sys.stdin.isatty():
+        if source == "ykman":
+            log_error_and_exit(
+                logger,
+                "ykman requires an interactive terminal for the YubiKey "
+                "touch. Use 1Password (or manual entry) for unattended "
+                "refresh.",
+            )
+        log_error_and_exit(
+            logger,
+            "No MFA source configured for profile '%s' and no interactive "
+            "terminal is available. Run 'aws-xfa %s --1pass' (or set "
+            "mfa_source) to configure." % (profile, profile),
+        )
+
+    # (e) Dispatch to the chosen source.
+    if source == "ykman":
+        mfa_token = get_otp_from_ykman(account, logger)
+    elif source == "1password":
+        mfa_token = get_otp_from_1password(item, logger)
+    else:  # prompt — re-prompts until a valid 6-digit code is entered.
+        mfa_token = prompt_with_validation(prompt_text, validate_totp_code, logger)
+
+    # (f) Interactive fallback for a *failed* non-prompt source.
+    if mfa_token is None and source != "prompt":
         if not sys.stdin.isatty():
             log_error_and_exit(
                 logger,
-                "No 1Password item configured for profile '%s' and no "
-                "interactive terminal is available. Run "
-                "'aws-xfa %s --1pass' to configure." % (profile, profile),
+                "%s OTP lookup failed and no interactive terminal is "
+                "available for manual entry." % source,
             )
-        mfa_token = console_input(
-            "Enter AWS MFA code for device [%s] "
-            "(renewing for %s seconds): " % (mfa_device, duration)
+        logger.warning("Falling back to manual MFA entry.")
+        mfa_token = prompt_with_validation(prompt_text, validate_totp_code, logger)
+
+    # (g) Shared validation gate — guards EVERY source before the STS call.
+    if not is_valid_totp(mfa_token):
+        msg = "MFA code is not a valid 6-digit TOTP."
+        if looks_like_modhex(mfa_token):
+            msg += (
+                " That's a YubiKey OTP (modhex), not an AWS TOTP — register a "
+                "virtual MFA (OATH-TOTP) device and use ykman/the OATH app."
+            )
+        log_error_and_exit(
+            logger,
+            "%s (length=%d numeric=%s)"
+            % (msg, len(mfa_token or ""), bool(mfa_token) and mfa_token.isdigit()),
         )
+    mfa_token = mfa_token.strip()
 
     sts_kwargs = dict(
         aws_access_key_id=lt_key_id,
@@ -756,22 +1059,12 @@ def get_credentials(
     except ParamValidationError as e:
         log_error_and_exit(logger, str(e))
 
-    options = [
-        ("aws_access_key_id", "AccessKeyId"),
-        ("aws_secret_access_key", "SecretAccessKey"),
-        ("aws_session_token", "SessionToken"),
-        ("aws_security_token", "SessionToken"),
-    ]
-    for option, value in options:
-        config.set(short_term_name, option, response["Credentials"][value])
-
-    config.set(
+    _write_short_term_creds(
+        config,
         short_term_name,
-        "expiration",
-        response["Credentials"]["Expiration"].strftime("%Y-%m-%d %H:%M:%S"),
+        response["Credentials"],
+        response["Credentials"]["Expiration"],
     )
-    with open(AWS_CREDS_PATH, "w") as configfile:
-        config.write(configfile)
     logger.info(
         "Success! Your credentials will expire in %s at: %s",
         _bold(_format_duration(duration)),
@@ -779,6 +1072,123 @@ def get_credentials(
     )
     print()
     sys.exit(0)
+
+
+def _iso8601_to_utc(expiration_str):
+    """Parse an export-credentials ISO8601 Expiration into a tz-aware UTC
+    datetime. Handles a trailing 'Z', which datetime.fromisoformat rejects
+    before Python 3.11 (project supports >=3.9)."""
+    s = expiration_str.strip().replace("Z", "+00:00")
+    dt = datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def _export_credentials(profile):
+    """Resolve SSO role credentials for *profile* via AWS CLI v2.
+
+    Returns (creds_dict, "") on success or (None, stderr) on failure. Overrides
+    only AWS_SHARED_CREDENTIALS_FILE (-> os.devnull) so the CLI resolves through
+    the profile's SSO config rather than any static creds aws-xfa previously
+    wrote into ~/.aws/credentials; all other env (sso_region, FIPS, proxies,
+    AWS_CONFIG_FILE) is inherited.
+    """
+    env = dict(os.environ)
+    env["AWS_SHARED_CREDENTIALS_FILE"] = os.devnull
+    try:
+        result = subprocess.run(
+            ["aws", "configure", "export-credentials",
+             "--profile", profile, "--format", "process"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except FileNotFoundError:
+        return None, "aws CLI not found"
+    except subprocess.TimeoutExpired:
+        return None, "'aws configure export-credentials' timed out"
+    if result.returncode != 0:
+        return None, (result.stderr or "").strip()
+    try:
+        data = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None, "could not parse export-credentials output as JSON"
+    required = ("AccessKeyId", "SecretAccessKey", "SessionToken", "Expiration")
+    if not all(k in data for k in required):
+        return None, "export-credentials output missing required fields"
+    return data, ""
+
+
+def get_credentials_sso(profile, config, args, xfa_config):
+    """Materialize IAM Identity Center (SSO) role credentials into [profile].
+
+    Resolves short-lived role credentials via AWS CLI v2 and writes them into
+    ~/.aws/credentials the same way the STS path does. Requires AWS CLI v2;
+    runs 'aws sso login' (interactive browser/FIDO) when the SSO token is stale.
+    """
+    short_term_name = profile
+
+    cli_major, cli_version_str = detect_aws_cli_version()
+    if cli_major is None:
+        log_error_and_exit(
+            logger,
+            "AWS CLI not found, but it is required for SSO profiles. "
+            "Please install AWS CLI v2.",
+        )
+    if cli_major < 2:
+        log_error_and_exit(
+            logger,
+            "AWS CLI v2 is required for SSO profiles (found %s)." % cli_version_str,
+        )
+
+    # Skip if our previously materialized creds are still comfortably valid
+    # (5-minute freshness margin so consumers never get near-expired creds).
+    if _short_term_still_valid(config, short_term_name, args.force, min_remaining=300):
+        return
+
+    creds, err1 = _export_credentials(profile)
+    if creds is None:
+        if "Invalid choice" in err1 and "export-credentials" in err1:
+            log_error_and_exit(
+                logger,
+                "Your AWS CLI does not support 'configure export-credentials'. "
+                "Please upgrade to a recent AWS CLI v2.",
+            )
+        if not sys.stdin.isatty():
+            log_error_and_exit(
+                logger,
+                "SSO credentials for profile '%s' could not be resolved and no "
+                "interactive terminal is available for 'aws sso login'. "
+                "export-credentials said: %s" % (profile, err1),
+            )
+        logger.info("Launching 'aws sso login' for profile '%s'...", profile)
+        login = subprocess.run(["aws", "sso", "login", "--profile", profile])
+        if login.returncode != 0:
+            log_error_and_exit(
+                logger, "'aws sso login' failed for profile '%s'." % profile
+            )
+        creds, err2 = _export_credentials(profile)
+        if creds is None:
+            log_error_and_exit(
+                logger,
+                "Could not resolve SSO credentials for profile '%s' after login.\n"
+                "  export before login: %s\n  export after login:  %s"
+                % (profile, err1 or "(none)", err2 or "(none)"),
+            )
+
+    exp_dt = _iso8601_to_utc(creds["Expiration"])
+    _write_short_term_creds(config, short_term_name, creds, exp_dt)
+
+    remaining = (exp_dt - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    logger.info(
+        "Success! Your credentials will expire in %s at: %s",
+        _bold(_format_duration(remaining)),
+        _format_expiration(exp_dt),
+    )
+    print()
 
 
 def _format_duration(total_seconds):

@@ -48,3 +48,52 @@ def set_1pass_item(config, profile, item_name):
     profiles = dict(config.get("profiles", {}))
     profiles[profile] = dict(profiles.get(profile, {}), onepassword_item=item_name)
     return dict(config, profiles=profiles)
+
+
+def get_mfa_source(config, profile):
+    """Return the configured MFA source for a profile, or None if not set.
+
+    One of 'ykman', '1password', 'prompt', or None (inferred at runtime).
+    """
+    try:
+        return config["profiles"][profile]["mfa_source"]
+    except (KeyError, TypeError):
+        return None
+
+
+def set_mfa_source(config, profile, source):
+    """Return a new config dict with the MFA source set for a profile."""
+    profiles = dict(config.get("profiles", {}))
+    profiles[profile] = dict(profiles.get(profile, {}), mfa_source=source)
+    return dict(config, profiles=profiles)
+
+
+def get_ykman_account(config, profile):
+    """Return the ykman OATH account label for a profile, or None if not set."""
+    try:
+        return config["profiles"][profile]["ykman_account"]
+    except (KeyError, TypeError):
+        return None
+
+
+def set_ykman_account(config, profile, account):
+    """Return a new config dict with the ykman OATH account label set."""
+    profiles = dict(config.get("profiles", {}))
+    profiles[profile] = dict(profiles.get(profile, {}), ykman_account=account)
+    return dict(config, profiles=profiles)
+
+
+def get_auth_type(config, profile):
+    """Return the per-profile auth override ('sso' | 'sts'), or None to
+    auto-detect at runtime."""
+    try:
+        return config["profiles"][profile]["auth_type"]
+    except (KeyError, TypeError):
+        return None
+
+
+def set_auth_type(config, profile, value):
+    """Return a new config dict with the auth type set for a profile."""
+    profiles = dict(config.get("profiles", {}))
+    profiles[profile] = dict(profiles.get(profile, {}), auth_type=value)
+    return dict(config, profiles=profiles)

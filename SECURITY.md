@@ -16,8 +16,22 @@ at any security standard.**
 
 - Simplify the AWS MFA credential workflow for individual developers
 - Reduce manual `aws sts get-session-token` invocations
-- Optionally retrieve TOTP codes from 1Password CLI
+- Optionally retrieve TOTP codes from 1Password CLI or a YubiKey via `ykman`
 - Cache temporary session credentials locally in `~/.aws/credentials`
+
+### MFA code handling
+
+- aws-xfa validates that every MFA code is a 6-digit TOTP **before** sending it
+  to AWS STS, regardless of source (YubiKey, 1Password, or manual entry). A
+  FIDO/U2F serial (`:u2f/`) is rejected up front — FIDO cannot be used with the
+  CLI/STS.
+- aws-xfa **never reads, stores, or logs** the YubiKey OATH access code
+  (password) or the TOTP seed. For FIPS keys it relies on `ykman`'s own OS
+  keyring caching (`ykman oath access remember`).
+- A rejected MFA value is never written to logs verbatim (only its length and
+  whether it was numeric), since it may be a valid secret.
+- The auto-refresh daemon refuses any profile not using 1Password, because
+  unattended refresh cannot satisfy a YubiKey touch.
 
 ### What aws-xfa is NOT designed to protect against
 
@@ -54,8 +68,7 @@ at any security standard.**
 If you discover a security vulnerability, please report it responsibly:
 
 1. **DO NOT** open a public GitHub issue for security vulnerabilities.
-2. Send a description of the vulnerability to: **[INSERT EMAIL OR USE
-   GITHUB SECURITY ADVISORIES]**
+2. Send a description of the vulnerability to: awsxfa@icloud.com
 3. Include steps to reproduce, if possible.
 4. Allow reasonable time for assessment before public disclosure.
 

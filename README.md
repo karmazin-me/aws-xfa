@@ -140,6 +140,65 @@ aws-xfa main      # same for named profile
 
 Requires the [`op` CLI](https://developer.1password.com/docs/cli/) to be installed and signed in. If `op` fails, aws-xfa falls back to prompting you manually.
 
+## Using a YubiKey for CLI MFA
+
+> **A FIDO/U2F security key cannot be used here.** AWS STS (`GetSessionToken`/`AssumeRole`) only accepts a 6-digit TOTP — FIDO works **only** for Console sign-in. If your profile's `aws_mfa_device` is a `:u2f/` ARN, aws-xfa stops with a clear message. Register a separate **virtual MFA (OATH-TOTP)** device for the CLI; you can keep the FIDO key for the Console (IAM allows up to 8 MFA devices per user).
+
+A YubiKey 5 (including the FIPS series) can act as that virtual MFA device via its OATH-TOTP application, and aws-xfa can pull the code from it with [`ykman`](https://developers.yubico.com/yubikey-manager/) (≥ 5.x):
+
+1. In IAM, **Assign MFA device → Authenticator app**, and reveal the secret key (don't scan the QR).
+2. Add it to the YubiKey's OATH app (prefer importing the `otpauth://` URI / QR over passing the secret on the command line, which leaks it into shell history):
+
+   ```sh
+   ykman oath accounts add --issuer "Amazon Web Services" --oath-type TOTP \
+     --digits 6 --algorithm SHA1 --touch "your-iam-username"
+   ```
+
+3. Finish IAM registration by entering two consecutive codes (`ykman oath accounts code --single "<label>"`).
+4. **FIPS keys only:** the OATH applet must have an access code; cache it once so codes generate non-interactively:
+
+   ```sh
+   ykman oath access remember
+   ```
+
+5. Point the profile's `aws_mfa_device` at the new `:mfa/` ARN, then configure aws-xfa:
+
+   ```sh
+   aws-xfa --ykman          # one-time: pick the OATH account label, saved to config.json
+   aws-xfa                  # from then on: touch the key when prompted, code is fetched
+   ```
+
+The chosen source is saved per profile (`mfa_source` + `ykman_account` in `~/.config/aws-xfa/config.json`). `--ykman` and `--1pass` are mutually exclusive. The YubiKey path is **interactive only** — the auto-refresh daemon requires 1Password (a touch can't be automated).
+
+**Troubleshooting:** codes depend on the host clock — keep it NTP-synced. AWS rejects a TOTP reused within its 30-second window, so on a transient error wait for a fresh code rather than retrying immediately.
+
+## AWS IAM Identity Center (SSO)
+
+aws-xfa also manages **SSO** profiles. This is the phishing-resistant, FedRAMP/GovCloud-friendly path: your security key (FIDO) authenticates the browser sign-in, and aws-xfa materializes the resulting short-lived **role** credentials into `~/.aws/credentials` — so tools that only read static credentials keep working.
+
+One-time, point a profile at Identity Center (writes `~/.aws/config`):
+
+```sh
+aws configure sso          # creates an [sso-session] + [profile <name>]
+```
+
+Then aws-xfa handles it like any other profile:
+
+```sh
+aws-xfa my-sso-profile
+# (if the SSO token is stale) launches 'aws sso login' -> browser + security key
+# Success! Your credentials will expire in 0h 59m at: ...
+```
+
+aws-xfa auto-detects SSO from `~/.aws/config` (a profile with `sso_account_id` + `sso_role_name`); no flag needed. You can pin it with an `auth_type` of `sso` or `sts` per profile in `~/.config/aws-xfa/config.json`.
+
+Notes:
+- **Requires AWS CLI v2** on your PATH (aws-xfa uses `aws configure export-credentials` and `aws sso login`).
+- `--1pass` / `--ykman` / `--duration` are ignored for SSO profiles (no OTP leg; the session length is set by the permission set).
+- The **auto-refresh daemon refuses SSO profiles** — `aws sso login` needs an interactive browser + security key and can't run unattended.
+
+For a full walkthrough (registering a FIDO security key, assume-role sub-profiles, GovCloud/FIPS, and troubleshooting), see **[SSO_CONFIGURATION.md](SSO_CONFIGURATION.md)**.
+
 ## Auto-refresh daemon
 
 Keep credentials fresh in the background — no manual intervention ever. The daemon wakes 5 minutes before expiry and renews automatically.
@@ -171,6 +230,7 @@ On Linux without systemd (Alpine, OpenRC, WSL), the daemon won't survive reboot 
 |------|-------------|
 | `--force` | Refresh even if credentials are still valid |
 | `--1pass` | Configure 1Password for this profile (one-time setup) |
+| `--ykman` | Use a YubiKey (ykman OATH-TOTP) for this profile (one-time setup; mutually exclusive with `--1pass`) |
 | `--duration SECONDS` | Session duration (default: 43200 = 12 h, min: 900, max: 129600) |
 | `--log-level debug` | Verbose output |
 

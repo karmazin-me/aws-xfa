@@ -96,6 +96,78 @@ def get_otp_from_1password(item_name, logger):
         return None
 
 
+def get_otp_from_ykman(account_query, logger, timeout=30):
+    """Fetch a 6-digit OATH-TOTP from a YubiKey via ``ykman``.
+
+    Returns the code on success, or None on any failure (with a warning).
+    stderr is inherited so the "Touch your YubiKey" / password prompt is
+    visible; stdin is closed so a stdin-based prompt can't hang the call
+    (a locked/uncached OATH keyring reads /dev/tty, so the real bound there
+    is *timeout*). The raw value is never logged on the reject path.
+    """
+    if not account_query or not account_query.strip():
+        logger.warning("No ykman OATH account configured; cannot fetch MFA code.")
+        return None
+    try:
+        result = subprocess.run(
+            ["ykman", "oath", "accounts", "code", "--single", "--", account_query],
+            stdout=subprocess.PIPE,
+            stderr=None,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+            text=True,
+        )
+    except FileNotFoundError:
+        logger.warning(
+            "'ykman' not found in PATH. Install yubikey-manager "
+            "(brew install ykman / pipx install yubikey-manager)."
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "ykman timed out (waiting for touch, an OATH password prompt, a "
+            "locked keyring, a wedged PC/SC stack, or multiple keys inserted)."
+        )
+        return None
+    if result.returncode != 0:
+        logger.warning(
+            "Couldn't get a code from the YubiKey. Check: the key is inserted "
+            "and CCID/OATH enabled; 'ykman oath accounts list' shows the "
+            "account (--single errors on zero or multiple matches); for FIPS "
+            "keys run 'ykman oath access remember' once; require ykman >= 5.x."
+        )
+        return None
+    code = (result.stdout or "").strip()
+    if not is_valid_totp(code):
+        # Never log the raw value — it may be a valid secret.
+        logger.warning(
+            "ykman returned a non-TOTP value (length=%d numeric=%s).",
+            len(code),
+            code.isdigit(),
+        )
+        return None
+    return code
+
+
+def list_ykman_accounts(logger, timeout=10):
+    """Return the list of OATH account labels on the key, or None if listing
+    isn't possible (ykman missing, key absent, or OATH locked)."""
+    try:
+        result = subprocess.run(
+            ["ykman", "oath", "accounts", "list"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return [ln.strip() for ln in (result.stdout or "").splitlines() if ln.strip()]
+
+
 def validate_access_key_id(value):
     """Check AWS access key ID format: AKIA prefix, >=15 chars."""
     if not value:
@@ -137,12 +209,47 @@ def validate_mfa_arn(value):
     """Check MFA device ARN format."""
     if not value:
         return False, "MFA device ARN is required."
+    if ":u2f/" in value:
+        return False, (
+            "This is a FIDO/U2F security key ARN. FIDO works only for AWS "
+            "Console sign-in; the CLI/STS needs a virtual MFA (OATH-TOTP) "
+            "device. Register one in IAM and use its ':mfa/' ARN."
+        )
     if not re.match(r'^arn:aws[a-z-]*:iam::\d{12}:mfa/.+$', value):
         return False, (
             "Invalid MFA ARN format. "
             "Expected: arn:aws:iam::<12-digit-account>:mfa/<username>"
         )
     return True, ""
+
+
+def is_valid_totp(code):
+    """True only for a 6-digit ASCII TOTP code (after stripping surrounding
+    whitespace). Uses [0-9] (not \\d, which is Unicode-wide) and never int()
+    (which would drop leading zeros)."""
+    return isinstance(code, str) and bool(re.fullmatch(r"[0-9]{6}", code.strip()))
+
+
+def looks_like_modhex(value):
+    """True if *value* looks like a Yubico OTP (modhex), e.g. the 44-char
+    string emitted by a YubiKey's OTP slot on touch."""
+    return isinstance(value, str) and bool(
+        re.fullmatch(r"[cbdefghijklnrtuv]{32,48}", value)
+    )
+
+
+def validate_totp_code(value):
+    """(ok, msg) validator for prompt_with_validation: accept a 6-digit TOTP,
+    reject everything else with an actionable message."""
+    if is_valid_totp(value):
+        return True, ""
+    if looks_like_modhex(value):
+        return False, (
+            "That looks like a YubiKey OTP (modhex), not an AWS TOTP code. "
+            "AWS codes come from the OATH app (ykman / Yubico Authenticator), "
+            "not from touching the key at this prompt."
+        )
+    return False, "AWS STS requires a 6-digit TOTP code (digits only)."
 
 
 def validate_role_arn(value):
